@@ -1,0 +1,314 @@
+const express = require('express');
+const line = require('@line/bot-sdk');
+const { Client } = require('@notionhq/client');
+
+// Line configuration
+const lineConfig = {
+  channelAccessToken: 'TEWSEktC8APz9Wr5Lc3/q+nqwFgDAgT7iGlonRIev/0Gu17fAVRve3HXCCQDc9++enpF3N7yGgHJxSpQrmWnBNlFS9k2HPgm3PWSvIe5SkFNQ2yuXjPn21SfCcFdPJaS3XNC/lgLrAy8R5whU9jQEgdB04t89/1O/w1cDnyilFU=',
+  channelSecret: '7b9541a7343e8f661d1abdffc14b2be7',
+};
+
+// Notion configuration
+const notion = new Client({ auth: 'secret_zP658OqGthTP7y7YQYUZBqHnA5iK4ARQA3kuycj7rqu' });
+const databaseId = 'e223741f5c034cc3aa5555c591774898';
+
+// Create an Express server
+const app = express();
+
+// Create a Line bot instance
+const lineBot = new line.Client(lineConfig);
+
+// Webhook endpoint for Line events
+app.post('/webhook', line.middleware(lineConfig), async (req, res) => {
+  try {
+    const events = req.body.events;
+    await Promise.all(events.map(handleEvent));
+    res.status(200).end();
+  } catch (err) {
+    console.error(err);
+    res.status(500).end();
+  }
+});
+
+// Function to handle Line events
+async function handleEvent(event) {
+  if (event.type === 'message' && event.message.type === 'text') {
+    const userId = event.source.userId;
+    const message = event.message.text.toLowerCase();
+
+    if (!event.replyToken) {
+      // Ignore non-reply events (e.g., follow event)
+      return;
+    }
+
+    if (message === 'check availability') {
+      // Reply with a prompt to ask for the table name
+      await lineBot.replyMessage(event.replyToken, {
+        type: 'text',
+        text: 'Which table would you like to check the availability for?',
+      });
+    } else if (message.startsWith('is the')) {
+      // Extract the table name from the user's message
+      const tableName = message.replace('is the', '').trim();
+
+      // Check if the table is available in the Notion database
+      const isTableAvailable = await checkTableAvailability(tableName);
+      const replyMessage = isTableAvailable
+        ? `${tableName} is available! How many people would like to order?`
+        : `${tableName} is not available.`;
+
+      await lineBot.replyMessage(event.replyToken, { type: 'text', text: replyMessage });
+    } else if (isNaN(message)) {
+      // Process the table name as a response to the availability check
+      // Store the table name for reference
+      await storeTableNameInNotion(userId, message, event);
+
+      // Reply to the user and ask for the number of people
+      await lineBot.replyMessage(event.replyToken, {
+        type: 'text',
+        text: 'How many people would like to order?',
+      });
+    } else {
+      // Process the message as the number of people
+      // Store the number of people in the checking row
+      await replaceRowWithCheckingRow(previousCheckingRow, userId, message);
+
+      // Reply to the user
+      const replyMessage = 'Number of people received! Thank you.';
+      await lineBot.replyMessage(event.replyToken, { type: 'text', text: replyMessage });
+    }
+  }
+}
+
+// Function to check table availability in Notion based on table name
+async function checkTableAvailability(tableName) {
+  try {
+    const response = await notion.databases.query({
+      database_id: databaseId,
+      filter: {
+        property: 'Name',
+        title: {
+          equals: tableName,
+        },
+      },
+    });
+
+    console.log('Check table availability response:', response);
+
+    if (response.results.length > 0) {
+      const tableRow = response.results[0]; // Assuming only one row matches the table name
+      console.log('Table row:', tableRow);
+      return tableRow.properties.Availability.select.name === 'Available';
+    }
+
+    return false; // If no row is found for the table name
+  } catch (err) {
+    console.error('Error checking table availability:', err);
+    throw err;
+  }
+}
+
+// Function to get the previous checking row for a table name
+async function getPreviousCheckingRow(tableName) {
+  try {
+    const response = await notion.databases.query({
+      database_id: databaseId,
+      filter: {
+        property: 'Name',
+        title: {
+          equals: tableName,
+        },
+      },
+    });
+
+    if (response.results.length > 0) {
+      const tableRow = response.results[0]; // Assuming only one row matches the table name
+      return tableRow;
+    }
+
+    return null; // If no row is found for the table name
+  } catch (err) {
+    console.error('Error getting previous checking row:', err);
+    throw err;
+  }
+}
+
+// Function to replace the previous available row with the new checking row and update the availability, user, and number of people
+async function replaceRowWithCheckingRow(previousCheckingRow, userId, numberOfPeople) {
+  try {
+    if (previousCheckingRow) {
+      // Update the properties of the previous checking row
+      const response = await notion.pages.update({
+        page_id: previousCheckingRow.id,
+        properties: {
+          Availability: {
+            select: {
+              name: 'Booked',
+            },
+          },
+          User: {
+            rich_text: [
+              {
+                type: 'text',
+                text: {
+                  content: userId,
+                },
+              },
+            ],
+          },
+          Number: {
+            rich_text: [
+              {
+                type: 'text',
+                text: {
+                  content: numberOfPeople,
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      console.log('Table availability and user information updated in Notion:', response);
+
+      return response;
+    } else {
+      console.log('No previous checking row found. Skipping update.');
+      return null;
+    }
+  } catch (err) {
+    console.error('Error updating table availability and user information:', err);
+    throw err;
+  }
+}
+
+// Function to wait for user response
+function waitForUserResponse() {
+  return new Promise((resolve) => {
+    // Implement the logic to wait for user response here
+    // For example, you can use a library or mechanism to listen for user input
+    // and resolve the promise when the user responds.
+    // In this example, I'll simulate a delayed response.
+    setTimeout(() => {
+      resolve({ message: { text: 'New table name' } }); // Replace with the actual user response
+    }, 2000); // Replace with an appropriate delay
+  });
+}
+
+// Function to store the table name in Notion for reference and replace with the previous available row if applicable
+async function storeTableNameInNotion(userId, tableName, event) {
+  try {
+    let isTableAvailable = false;
+    let previousCheckingRow = null;
+
+    while (!isTableAvailable) {
+      // Check if the table is available in the Notion database
+      const tableRow = await checkTableAvailability(tableName);
+
+      if (tableRow) {
+        isTableAvailable = true;
+
+        if (tableRow.properties['Availability'] && tableRow.properties['Availability'].select !== undefined) {
+          const availability = tableRow.properties['Availability'].select.name;
+
+          if (availability === 'Booked') {
+            // Get the previous checking row for the table name
+            previousCheckingRow = await getPreviousCheckingRow(tableName);
+
+            if (previousCheckingRow) {
+              // Replace the previous available row with the new checking row
+              await replaceRowWithCheckingRow(previousCheckingRow, userId);
+              console.log('Table name replaced in Notion with the previous available row:', previousCheckingRow);
+            }
+          }
+        }
+      } else {
+        // Ask for a new table name
+        await lineBot.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `Table "${tableName}" is not available. Please enter a different table name.`,
+        });
+
+        // Wait for the user to provide a new table name
+        const newTableNameEvent = await waitForUserResponse();
+        tableName = newTableNameEvent.message.text;
+      }
+    }
+
+    // Create a new row for the current checking
+    const response = await notion.pages.create({
+      parent: { database_id: databaseId },
+      properties: {
+        User: {
+          rich_text: [
+            {
+              type: 'text',
+              text: {
+                content: userId,
+              },
+            },
+          ],
+        },
+        Name: {
+          title: [
+            {
+              text: {
+                content: tableName,
+              },
+            },
+          ],
+        },
+        'Availability check': {
+          checkbox: true,
+        },
+      },
+    });
+
+    console.log('Table name stored in Notion:', response);
+
+    return { previousCheckingRow, response }; // Return previousCheckingRow along with the response
+  } catch (err) {
+    console.error('Error storing table name in Notion:', err);
+    throw err;
+  }
+}
+
+// Function to store the number of people in Notion
+async function storeNumberOfPeopleInNotion(userId, numberOfPeople) {
+  try {
+    await notion.pages.create({
+      parent: { database_id: databaseId },
+      properties: {
+        User: {
+          rich_text: [
+            {
+              type: 'text',
+              text: {
+                content: userId,
+              },
+            },
+          ],
+        },
+        Number: {
+          rich_text: [
+            {
+              type: 'text',
+              text: {
+                content: numberOfPeople,
+              },
+            },
+          ],
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Error storing number of people in Notion:', err);
+    throw err;
+  }
+}
+
+// Start the server
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Server is listening on port ${port}`);
+});
